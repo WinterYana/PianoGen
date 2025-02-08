@@ -2,50 +2,67 @@ from music21 import *
 from mido import *
 from tqdm import tqdm
 import os
-from fractions import Fraction
+import math
 
 
-def normalize_bpm_and_beat_size(midi_data, correct_bpm=120):
-    norm_tracks = []
+def normalize_bpm_and_bar_size(midi_data, correct_bpm=120):
+    normalized_midi = stream.Score()
 
-    for track in midi_data.tracks:
-        changed_track = MidiTrack()
-        scale_factor = 1.0
+    for part in midi_data.parts:
+        norm_part = stream.Part()
+        old_tempos = list(part.flatten().getElementsByClass(tempo.MetronomeMark))
+        old_time_signatures = list(part.flatten().getElementsByClass(meter.TimeSignature))
 
-        for elem in track:
-            if elem.type == 'set_tempo':
-                elem.tempo = bpm2tempo(correct_bpm)
-            elif elem.type == 'time_signature':
-                start_numerator = elem.numerator
-                start_denominator = elem.denominator
+        for event in old_tempos:
+            part.remove(event)
+        for event in old_time_signatures:
+            part.remove(event)
 
-                scale_factor = (4 / start_denominator) * start_numerator
-                elem = MetaMessage('time_signature', numerator=4, denominator=4, clocks_per_click=24, notated_32nd_notes_per_beat=8)
+        new_tempo = tempo.MetronomeMark(number=correct_bpm)
+        new_time_signature = meter.TimeSignature('4/4')
+        norm_part.append(new_time_signature)
+        norm_part.append(new_tempo)
 
-            if elem.time > 0:
-                elem.time = int(elem.time * scale_factor)
-            changed_track.append(elem)
+        events_by_offset = {}  # Чтобы сохранить наложение нот
+        for elem in part.flatten():
+            if isinstance(elem, (tempo.MetronomeMark, meter.TimeSignature)):
+                continue
+            if elem.offset not in events_by_offset:
+                events_by_offset[elem.offset] = []
+            events_by_offset[elem.offset].append(elem)
 
-        norm_tracks.append(changed_track)
+        for offset in sorted(events_by_offset.keys()):
+            chord_notes = []  # Список нот, которые должны играться одновременно
+            for elem in events_by_offset[offset]:
+                if isinstance(elem, note.Note) and elem.tie:
+                    prev_tie = elem.tie
+                    new_note = elem.__deepcopy__()
+                    new_note.tie = prev_tie
+                    chord_notes.append(new_note)
+                elif isinstance(elem, chord.Chord):
+                    chord_notes.append(elem)
+                else:
+                    norm_part.insert(offset, elem)
 
-    norm_midi = MidiFile()
-    norm_midi.ticks_per_beat = midi_data.ticks_per_beat
+            if len(chord_notes) > 1:
+                combined_chord = chord.Chord(chord_notes)
+                norm_part.insert(offset, combined_chord)
+            else:
+                for note_elem in chord_notes:
+                    norm_part.insert(offset, note_elem)
 
-    total_time = max(sum(elem.time for elem in track) for track in norm_tracks)
-    measure_time = midi_data.ticks_per_beat * 4
+        normalized_midi.append(norm_part)
 
-    if len(norm_tracks) < 3:
-        print(1)
-        left_hand_track = MidiTrack()
-        for _ in range(total_time // measure_time):
-            left_hand_track.append(Message('note_on', note=0, velocity=0, time=measure_time))
-        norm_midi.tracks.append(left_hand_track)
+    midi_file = midi.translate.music21ObjectToMidiFile(normalized_midi)
+    normalized_midi.write('midi', fp=os.path.join(output_path, music_file))
+    #normalized_midi.show()
+    m = converter.parse(os.path.join(output_path, music_file))
+    m.show()
+    return midi_file
 
-    for track in norm_tracks:
-        norm_midi.tracks.append(track)
 
-    return norm_midi
-
+def split_by_segments(midi_data, segment_measures=8):
+    segments = []
 
 
 files_path = '../data/midi'
@@ -58,20 +75,20 @@ for music_file in tqdm(os.listdir(files_path)):
     if os.path.getsize(music_path) == 0:
         print(f"{music_path} - пустой")
         continue
-
-    count += 1
-    if count > 6:
-        break
-    if count == 1:
+    if count < 3:
+        count += 1
         continue
-    """midi_data = converter.parse(music_path)
+
+    midi_data = converter.parse(music_path)
     midi_data.show()
-    print(music_path)
+    """print(music_path)
     .save(os.path.join(output_path, music_file))"""
+    normalize_bpm_and_bar_size(midi_data)
 
-    midi_data = MidiFile(music_path)
-    midi_data = normalize_bpm_and_beat_size(midi_data)
-    midi_data.save(os.path.join(output_path, music_file))
+    #split_by_bars(midi_data)
+    #midi_data.save(os.path.join(output_path, music_file))
 
-    m = converter.parse(os.path.join(output_path, music_file))
-    m.show()
+    #m = converter.parse(os.path.join(output_path, music_file))
+
+    #m.show()
+    #break
