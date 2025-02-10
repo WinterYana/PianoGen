@@ -1,68 +1,75 @@
 from music21 import *
-from mido import *
+import copy
 from tqdm import tqdm
 import os
 import math
 
 
-def normalize_bpm_and_bar_size(midi_data, correct_bpm=120):
-    normalized_midi = stream.Score()
+def process_midi(midi_data, segment_size=8, bpm=120, time_signature="4/4", measure_length=4):
+    parts = midi_data.parts
+    all_notes = [list(part.flat.notesAndRests) for part in parts]
+    segment_length = segment_size * measure_length
 
-    for part in midi_data.parts:
-        norm_part = stream.Part()
-        old_tempos = list(part.flatten().getElementsByClass(tempo.MetronomeMark))
-        old_time_signatures = list(part.flatten().getElementsByClass(meter.TimeSignature))
-
-        for event in old_tempos:
-            part.remove(event)
-        for event in old_time_signatures:
-            part.remove(event)
-
-        new_tempo = tempo.MetronomeMark(number=correct_bpm)
-        new_time_signature = meter.TimeSignature('4/4')
-        norm_part.append(new_time_signature)
-        norm_part.append(new_tempo)
-
-        events_by_offset = {}  # Чтобы сохранить наложение нот
-        for elem in part.flatten():
-            if isinstance(elem, (tempo.MetronomeMark, meter.TimeSignature)):
-                continue
-            if elem.offset not in events_by_offset:
-                events_by_offset[elem.offset] = []
-            events_by_offset[elem.offset].append(elem)
-
-        for offset in sorted(events_by_offset.keys()):
-            chord_notes = []  # Список нот, которые должны играться одновременно
-            for elem in events_by_offset[offset]:
-                if isinstance(elem, note.Note) and elem.tie:
-                    prev_tie = elem.tie
-                    new_note = elem.__deepcopy__()
-                    new_note.tie = prev_tie
-                    chord_notes.append(new_note)
-                elif isinstance(elem, chord.Chord):
-                    chord_notes.append(elem)
-                else:
-                    norm_part.insert(offset, elem)
-
-            if len(chord_notes) > 1:
-                combined_chord = chord.Chord(chord_notes)
-                norm_part.insert(offset, combined_chord)
-            else:
-                for note_elem in chord_notes:
-                    norm_part.insert(offset, note_elem)
-
-        normalized_midi.append(norm_part)
-
-    midi_file = midi.translate.music21ObjectToMidiFile(normalized_midi)
-    normalized_midi.write('midi', fp=os.path.join(output_path, music_file))
-    #normalized_midi.show()
-    m = converter.parse(os.path.join(output_path, music_file))
-    m.show()
-    return midi_file
-
-
-def split_by_segments(midi_data, segment_measures=8):
     segments = []
+    for i, part_notes in enumerate(all_notes):
+        for note_now in part_notes:
+            note_length = note_now.duration.quarterLength
+            note_offset = note_now.offset
+
+            while note_length > 0:
+                segment_index = int(note_offset // segment_length)
+                while segment_index >= len(segments):
+                    new_segment = stream.Score()
+                    new_segment.insert(0, tempo.MetronomeMark(number=bpm))
+                    new_segment.insert(0, meter.TimeSignature(time_signature))
+                    for _ in range(len(parts)):
+                        new_segment.append(stream.Part())
+                    segments.append(new_segment)
+
+                current_part = segments[segment_index].parts[i]
+                segment_offset = note_offset % segment_length
+                free_time = segment_length - segment_offset
+
+                if note_length <= free_time:
+                    full_copy = copy.deepcopy(note_now)
+                    full_copy.offset = segment_offset
+                    current_part.insert(full_copy)
+                    note_length = 0
+                else:
+                    first_part = copy.deepcopy(note_now)
+                    second_part = copy.deepcopy(note_now)
+                    first_part.duration = duration.Duration(free_time)
+                    second_part.duration = duration.Duration(note_length - free_time)
+                    first_part.offset = segment_offset
+                    current_part.insert(first_part)
+
+                    note_now = second_part
+                    note_offset += free_time
+                    note_length -= free_time
+
+    last_segment = segments[-1]
+    last_segment_quarters = last_segment.duration.quarterLength
+
+    if last_segment_quarters < (segment_length / 2):
+        segments.pop()
+    else:
+        for part in last_segment.parts:
+            free_time = segment_length - last_segment_quarters
+            if last_segment_quarters % measure_length != 0:
+                rest_time = measure_length - (last_segment_quarters % measure_length)
+                rest = note.Rest()
+                rest.duration = duration.Duration(rest_time)
+
+                part.append(rest)
+                free_time -= rest_time
+            while free_time > 0:
+                rest = note.Rest()
+                rest.duration = duration.Duration(measure_length)
+
+                part.append(rest)
+                free_time -= measure_length
+
+    return segments
 
 
 files_path = '../data/midi'
@@ -75,20 +82,8 @@ for music_file in tqdm(os.listdir(files_path)):
     if os.path.getsize(music_path) == 0:
         print(f"{music_path} - пустой")
         continue
-    if count < 3:
-        count += 1
-        continue
 
     midi_data = converter.parse(music_path)
-    midi_data.show()
-    """print(music_path)
-    .save(os.path.join(output_path, music_file))"""
-    normalize_bpm_and_bar_size(midi_data)
-
-    #split_by_bars(midi_data)
-    #midi_data.save(os.path.join(output_path, music_file))
-
-    #m = converter.parse(os.path.join(output_path, music_file))
-
-    #m.show()
-    #break
+    if len(midi_data.parts) != 2:
+        continue
+    segments = process_midi(midi_data)
